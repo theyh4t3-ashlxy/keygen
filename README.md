@@ -1,5 +1,5 @@
 ### the pitch (idk what im doing)  
-hey u ever wanted a password generator that has libadwaita?
+hey u ever wanted a password generator that has libadwaita?  
 "no? i have bitwarden.."  
 "I DONT GIVE A FU-" *pan*  
 oh sorry.  
