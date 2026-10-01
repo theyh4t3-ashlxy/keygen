@@ -94,6 +94,8 @@ class VaultForgeUI(Adw.Application):
         self.header = Adw.HeaderBar()
         self.header.set_title_widget(Adw.ViewSwitcher(stack=self.app_stack, policy=Adw.ViewSwitcherPolicy.WIDE))
 
+        self.app_stack.connect("notify::visible-child", self._on_stack_page_changed)
+
         self.btn_lock = Gtk.Button(icon_name="system-lock-screen-symbolic", tooltip_text="lock this shit down", css_classes=["flat"])
         self.btn_lock.connect("clicked", self._action_lock)
         self.header.pack_start(self.btn_lock)
@@ -104,6 +106,13 @@ class VaultForgeUI(Adw.Application):
         
         self.win.present()
         self._on_generate(None)
+
+
+    def _on_stack_page_changed(self, stack, param) -> None:
+        if stack.get_visible_child_name() == "vault":
+            if not getattr(self, "vault", None) or not self.vault.is_unlocked:
+                if hasattr(self, "vault_unlock_entry"):
+                    self.vault_unlock_entry.grab_focus()
 
     def _on_window_key_pressed(self, ctrl, keyval, keycode, state) -> bool:
         self._last_activity = time.time()
@@ -155,6 +164,18 @@ class VaultForgeUI(Adw.Application):
             can_next = 0 <= self._history_idx < len(self._history) - 1
             self.btn_hist_prev.set_sensitive(can_prev)
             self.btn_hist_next.set_sensitive(can_next)
+            self.btn_hist_clear.set_sensitive(len(self._history) > 0)
+
+    def _on_history_clear(self, _btn) -> None:
+        self._history.clear()
+        self._history_idx = -1
+        self._update_history_buttons()
+        self.lbl_output.set_label("...")
+        self.entropy_bar.set_value(0)
+        self.entropy_lbl.set_label("strength: literally nothing")
+        self.crack_lbl.set_label("crack time: 0s")
+        for c in ["error", "warning", "success"]:
+            self.entropy_lbl.remove_css_class(c)
 
     def _on_roll_batch(self, _btn) -> None:
         count = self.vault.state.get("bulk_count", 10) if self.vault else 10
@@ -253,26 +274,6 @@ class VaultForgeUI(Adw.Application):
     def _tab_generator(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
 
-        g_engine = Adw.PreferencesGroup(title="choose your poison")
-        self.row_engine = Adw.ComboRow(title="chaos engine", model=Gtk.StringList.new(ENGINES))
-        
-        def _on_engine_change(combo, _):
-            idx = combo.get_selected()
-            self.vault.set("engine_mode", idx)
-            self.gen_stack.set_visible_child_name(f"mode_{idx}")
-            self._on_generate(None)
-
-        self.row_engine.connect("notify::selected", _on_engine_change)
-        g_engine.add(self.row_engine)
-        page.add(g_engine)
-
-        g_dynamic = Adw.PreferencesGroup(title="knobs &amp; dials")
-        self.gen_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        self.gen_stack.set_vhomogeneous(False)
-        self._build_engine_pages()
-        g_dynamic.add(self.gen_stack)
-        page.add(g_dynamic)
-
         self.out_grp = Adw.PreferencesGroup(title="the loot")
         out_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
 
@@ -302,17 +303,44 @@ class VaultForgeUI(Adw.Application):
         self.btn_hist_next.connect("clicked", self._on_history_next)
         self.btn_hist_next.set_sensitive(False)
 
+        self.btn_hist_clear = Gtk.Button(icon_name="edit-clear-all-symbolic", tooltip_text="clear history", css_classes=["pill", "flat"])
+        self.btn_hist_clear.connect("clicked", self._on_history_clear)
+        self.btn_hist_clear.set_sensitive(False)
+
         self.btn_copy_quick = Gtk.Button(label="yoink (ctrl+c)", icon_name="edit-copy-symbolic", css_classes=["pill"])
         self.btn_copy_quick.connect("clicked", lambda _: self._copy_val(self.lbl_output.get_label()))
 
         action_box.append(self.btn_hist_prev)
         action_box.append(self.btn_gen)
         action_box.append(self.btn_hist_next)
+        action_box.append(self.btn_hist_clear)
         action_box.append(self.btn_copy_quick)
         out_box.append(action_box)
 
         self.out_grp.add(out_box)
         page.add(self.out_grp)
+
+        g_engine = Adw.PreferencesGroup(title="choose your poison")
+        self.row_engine = Adw.ComboRow(title="chaos engine", model=Gtk.StringList.new(ENGINES))
+
+        def _on_engine_change(combo, _):
+            idx = combo.get_selected()
+            self.vault.set("engine_mode", idx)
+            self.gen_stack.set_visible_child_name(f"mode_{idx}")
+            self._on_generate(None)
+
+        self.row_engine.connect("notify::selected", _on_engine_change)
+        g_engine.add(self.row_engine)
+        page.add(g_engine)
+
+        g_dynamic = Adw.PreferencesGroup(title="knobs &amp; dials")
+        self.gen_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.gen_stack.set_vhomogeneous(False)
+        self._build_engine_pages()
+        g_dynamic.add(self.gen_stack)
+        page.add(g_dynamic)
+
+
 
         bulk_grp = Adw.PreferencesGroup()
         self.exp_bulk = Adw.ExpanderRow(title="loot hoard (bulk roll)", subtitle="generate a batch of keys at once")
@@ -348,6 +376,7 @@ class VaultForgeUI(Adw.Application):
         save_grp = Adw.PreferencesGroup(title="the stash")
         self.entry_label = Adw.EntryRow(title="what is this trash?")
         self.entry_tag = Adw.EntryRow(title="useless tag")
+        self.entry_tag.connect("entry-activated", self._on_save)
         save_grp.add(self.entry_label)
         save_grp.add(self.entry_tag)
         
@@ -364,6 +393,7 @@ class VaultForgeUI(Adw.Application):
         g0 = Adw.PreferencesGroup()
         r0 = Adw.ActionRow(title="how long?")
         self.spin_pwd_len = Gtk.SpinButton.new_with_range(4, 256, 1)
+        self.spin_pwd_len.set_tooltip_text("How many characters long the password should be")
         self.spin_pwd_len.set_value(self.vault.DEFAULTS["pwd_len"])
         self.spin_pwd_len.set_valign(Gtk.Align.CENTER)
         self.spin_pwd_len.connect("value-changed", lambda s: self.vault.set("pwd_len", int(s.get_value())) or self._on_generate(None))
@@ -391,6 +421,7 @@ class VaultForgeUI(Adw.Application):
         g1 = Adw.PreferencesGroup()
         r1 = Adw.ActionRow(title="how many words?")
         self.spin_phrase_len = Gtk.SpinButton.new_with_range(2, 20, 1)
+        self.spin_phrase_len.set_tooltip_text("Number of words in the phrase")
         self.spin_phrase_len.set_value(self.vault.DEFAULTS["phrase_words"])
         self.spin_phrase_len.set_valign(Gtk.Align.CENTER)
         self.spin_phrase_len.connect("value-changed", lambda s: self.vault.set("phrase_words", int(s.get_value())) or self._on_generate(None))
@@ -502,7 +533,7 @@ class VaultForgeUI(Adw.Application):
         if not result.startswith("ERR"):
             if not self._history or self._history[-1][0] != result:
                 self._history.append((result, self._current_type, entropy))
-                if len(self._history) > 30:
+                if len(self._history) > 50:
                     self._history.pop(0)
                 self._history_idx = len(self._history) - 1
             self._update_history_buttons()
@@ -515,18 +546,24 @@ class VaultForgeUI(Adw.Application):
     def _display_result(self, result: str, type_str: str, entropy: float, animate: bool = True) -> None:
         self._current_type = type_str
         if "ERR" in result or entropy <= 0:
-            score, label = 0, "strength: absolutely garbage"
+            score, label, color_class = 0, "strength: absolutely garbage", "error"
         elif entropy < 45:
-            score, label = 1, f"strength: wet paper towel ({int(entropy)} bits)"
+            score, label, color_class = 1, f"strength: wet paper towel ({int(entropy)} bits)", "error"
         elif entropy < 75:
-            score, label = 2, f"strength: mid ({int(entropy)} bits)"
+            score, label, color_class = 2, f"strength: mid ({int(entropy)} bits)", "warning"
         elif entropy < 110:
-            score, label = 3, f"strength: pretty beefy ({int(entropy)} bits)"
+            score, label, color_class = 3, f"strength: pretty beefy ({int(entropy)} bits)", "success"
         else:
-            score, label = 4, f"strength: gigachad ({int(entropy)} bits)"
+            score, label, color_class = 4, f"strength: gigachad ({int(entropy)} bits)", "success"
 
         self.entropy_bar.set_value(score)
         self.entropy_lbl.set_label(label)
+
+        # Remove old color classes
+        for c in ["error", "warning", "success"]:
+            self.entropy_lbl.remove_css_class(c)
+
+        self.entropy_lbl.add_css_class(color_class)
         self.crack_lbl.set_label(f"crack time: {estimate_crack_time(entropy)}")
 
         if score <= 1 and self.vault and self.vault.state.get("toxic_mode", False) and animate:
@@ -615,6 +652,7 @@ class VaultForgeUI(Adw.Application):
 
         self.vault_search = Gtk.SearchEntry(placeholder_text="search for shit...", hexpand=True)
         self.vault_search.connect("search-changed", lambda _: self.vault_list.invalidate_filter())
+        self.vault_search.connect("activate", lambda _: self.vault_list.grab_focus())
         
         self.vault_type_filter = Gtk.DropDown.new_from_strings(TYPE_FILTERS)
         self.vault_type_filter.connect("notify::selected", lambda *_: self.vault_list.invalidate_filter())
@@ -633,6 +671,9 @@ class VaultForgeUI(Adw.Application):
         btn_export.connect("clicked", self._on_export_stash)
         btn_import = Gtk.Button(label="import json", icon_name="document-open-symbolic", css_classes=["pill"], valign=Gtk.Align.CENTER)
         btn_import.connect("clicked", self._on_import_stash)
+        btn_clear = Gtk.Button(label="clear stash", icon_name="edit-clear-all-symbolic", css_classes=["pill", "destructive-action"], valign=Gtk.Align.CENTER)
+        btn_clear.connect("clicked", self._on_clear_stash)
+        row_backup.add_suffix(btn_clear)
         row_backup.add_suffix(btn_export)
         row_backup.add_suffix(btn_import)
         grp_search.add(row_backup)
@@ -642,7 +683,7 @@ class VaultForgeUI(Adw.Application):
         
         self.vault_view_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         self.vault_view_stack.add_named(
-            Adw.StatusPage(title="literally nothing here", description="generate some shit first.", icon_name="folder-symbolic"),
+            Adw.StatusPage(title="the stash is empty", description="generate something and shove it in.", icon_name="edit-clear-all-symbolic"),
             "empty"
         )
         
@@ -727,8 +768,7 @@ class VaultForgeUI(Adw.Application):
         self.vault_view_stack.set_visible_child_name("list")
         sorted_records = sorted(
             self.vault.records,
-            key=lambda r: (1 if r.get("fav", False) else 0, r.get("timestamp", 0)),
-            reverse=True
+            key=lambda r: (0 if r.get("fav", False) else 1, r.get("label", "").lower())
         )
         for item in sorted_records:
             self._append_vault_row(item)
@@ -819,7 +859,7 @@ class VaultForgeUI(Adw.Application):
             return self._toast("unlock the stash first.")
         exported = self.vault.export_vault_json()
         if cb := Gdk.Display.get_default().get_clipboard():
-            cb.set(exported)
+            cb.set_text(exported)
         self._toast(f"exported {len(self.vault.records)} records to clipboard.")
 
     def _on_import_stash(self, _btn) -> None:
@@ -854,6 +894,23 @@ class VaultForgeUI(Adw.Application):
         dialog.connect("response", _on_resp)
         dialog.present(self.win)
 
+
+    def _on_clear_stash(self, _btn) -> None:
+        dialog = Adw.AlertDialog.new("clear the stash?", "this will delete all records. are you sure?")
+        dialog.add_response("cancel", "cancel")
+        dialog.add_response("clear", "nuke it")
+        dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def _on_resp(d, resp):
+            if resp == "clear":
+                for item in list(self.vault.records):
+                    self.vault.delete_record(item["id"])
+                self._refresh_vault_list()
+                self._toast("stash cleared. all gone.")
+
+        dialog.connect("response", _on_resp)
+        dialog.present(self.win)
+
     def _delete_record(self, uid: str, rw: Gtk.ListBoxRow) -> None:
         self.vault.delete_record(uid)
         self.vault_list.remove(rw)
@@ -863,10 +920,10 @@ class VaultForgeUI(Adw.Application):
 
     def _copy_val(self, txt: str) -> None:
         if cb := Gdk.Display.get_default().get_clipboard():
-            cb.set(txt)
+            cb.set_text(txt)
             ttl = self.vault.state.get("clipboard_ttl", 0)
             if ttl > 0:
-                GLib.timeout_add_seconds(ttl, lambda: Gdk.Display.get_default().get_clipboard().set("") or False)
+                GLib.timeout_add_seconds(ttl, lambda: Gdk.Display.get_default().get_clipboard().set_text("") or False)
             if self.vault.state.get("toxic_mode", False):
                 self._toast(random.choice(["yoinked. try not to paste it in general chat.", "copied. you're gonna lose it anyway.", "stolen. hope nobody is looking.", "clipboard tainted."]) + (f" (nuking in {ttl}s)" if ttl else ""))
             else:
